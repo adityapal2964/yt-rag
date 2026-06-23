@@ -4,7 +4,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from dotenv import load_dotenv
 
-from youtube_transcript_api import YouTubeTranscriptApi
 from langchain_core.prompts import PromptTemplate
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_core.output_parsers import StrOutputParser
@@ -86,20 +85,16 @@ app.add_middleware(
 )
 
 # ─────────────────────────────────────────────
-# BM25 Retriever (no dependencies)
+# BM25 Retriever
 # ─────────────────────────────────────────────
 
 class BM25Retriever:
-    """Lightweight BM25 retriever — no torch, no HuggingFace, no FAISS."""
-
     def __init__(self, chunks: list[str]):
         self.chunks    = chunks
-        self.tokenized = [c.lower().split() for c in chunks]
-        self.bm25      = BM25Okapi(self.tokenized)
+        self.bm25      = BM25Okapi([c.lower().split() for c in chunks])
 
     def retrieve(self, query: str, k: int = RETRIEVER_K) -> str:
-        tokens  = query.lower().split()
-        scores  = self.bm25.get_scores(tokens)
+        scores  = self.bm25.get_scores(query.lower().split())
         top_idx = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)[:k]
         return "\n\n".join(self.chunks[i] for i in top_idx)
 
@@ -119,15 +114,11 @@ def format_chat_history(messages: list) -> str:
     return "\n".join(lines)
 
 
-def fetch_and_build_session(vid_id: str, language: str) -> None:
-    transcript_list = YouTubeTranscriptApi().fetch(vid_id, languages=[language])
-    transcript_text = " ".join(t.text for t in transcript_list)
-
+def build_session(transcript: str, vid_id: str) -> None:
     splitter = RecursiveCharacterTextSplitter(
         chunk_size=CHUNK_SIZE, chunk_overlap=CHUNK_OVERLAP
     )
-    chunks = splitter.split_text(transcript_text)
-
+    chunks = splitter.split_text(transcript)
     sessions[vid_id] = {
         "retriever": BM25Retriever(chunks),
         "history":   [],
@@ -138,8 +129,8 @@ def fetch_and_build_session(vid_id: str, language: str) -> None:
 # ─────────────────────────────────────────────
 
 class LoadRequest(BaseModel):
-    video_id: str
-    language: str = "en"
+    video_id:   str
+    transcript: str          # sent by the extension from the user's browser
 
 class ChatRequest(BaseModel):
     video_id: str
@@ -154,10 +145,12 @@ class ChatResponse(BaseModel):
 
 @app.post("/load")
 async def load_video(req: LoadRequest):
+    if not req.transcript.strip():
+        raise HTTPException(status_code=400, detail="Transcript is empty.")
     try:
-        fetch_and_build_session(req.video_id, req.language)
+        build_session(req.transcript, req.video_id)
     except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e))
     return {"status": "ready", "video_id": req.video_id}
 
 
